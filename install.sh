@@ -327,7 +327,9 @@ customize_config_toml() {
         ok "zhipu_coding 已存在，跳过"
     fi
 
-    [[ "$changed" == false ]] && ok "config.toml 无需修改"
+    if [[ "$changed" == false ]]; then
+        ok "config.toml 无需修改"
+    fi
 }
 
 customize_agent_toml() {
