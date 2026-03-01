@@ -4,19 +4,13 @@ OpenFang 个人定制脚本：一键安装/更新 + DingTalk Stream 补丁 + 自
 
 ## 快速开始
 
-一句话安装：
+一句话安装（从零开始，自动完成全部流程）：
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/pemagic/openfang_diy/main/install.sh)
+curl -sL https://raw.githubusercontent.com/pemagic/openfang_diy/main/install.sh | bash
 ```
 
-或者 clone 后运行：
-
-```bash
-git clone https://github.com/pemagic/openfang_diy.git
-cd openfang_diy
-./install.sh
-```
+更新时再跑一遍同样的命令，已有的配置和 Key 会自动跳过。
 
 ## 脚本说明
 
