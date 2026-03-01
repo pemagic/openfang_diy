@@ -277,6 +277,20 @@ customize_config_toml() {
 
     local changed=false
 
+    # [default_model] — 替换为 zhipu_coding / glm-5（init --quick 默认写 groq）
+    if grep -q 'provider = "groq"' "$CONFIG" 2>/dev/null; then
+        sed -i '' 's/provider = "groq"/provider = "zhipu_coding"/' "$CONFIG" 2>/dev/null || \
+        sed -i 's/provider = "groq"/provider = "zhipu_coding"/' "$CONFIG"
+        sed -i '' 's/model = "llama-3.3-70b-versatile"/model = "glm-5"/' "$CONFIG" 2>/dev/null || \
+        sed -i 's/model = "llama-3.3-70b-versatile"/model = "glm-5"/' "$CONFIG"
+        sed -i '' 's/api_key_env = "GROQ_API_KEY"/api_key_env = "ZHIPU_API_KEY"/' "$CONFIG" 2>/dev/null || \
+        sed -i 's/api_key_env = "GROQ_API_KEY"/api_key_env = "ZHIPU_API_KEY"/' "$CONFIG"
+        ok "default_model 已改为 zhipu_coding / glm-5"
+        changed=true
+    else
+        ok "default_model 已是自定义配置，跳过"
+    fi
+
     # [approval] require_approval = false — 关闭工具执行审批
     if ! grep -q '^\[approval\]' "$CONFIG"; then
         printf '\n[approval]\nrequire_approval = false\n' >> "$CONFIG"
@@ -423,16 +437,16 @@ write_key() {
         return 0
     fi
 
-    # 3. 交互式输入（兼容 curl | bash 的 stdin 被占用情况）
+    # 3. 交互式输入（兼容 curl | bash 的 stdin 被占用 / 无 tty 环境）
     local input_val=""
     if [[ -t 0 ]]; then
         echo -e "${YELLOW}  ? 请输入 ${display_name}（留空跳过）：${NC}"
         [[ -n "$help_text" ]] && echo -e "    $help_text"
-        read -rp "    ${var_name}: " input_val
-    elif [[ -e /dev/tty ]]; then
+        read -rp "    ${var_name}: " input_val || true
+    elif (echo -n > /dev/tty) 2>/dev/null; then
         echo -e "${YELLOW}  ? 请输入 ${display_name}（留空跳过）：${NC}"
         [[ -n "$help_text" ]] && echo -e "    $help_text"
-        read -rp "    ${var_name}: " input_val < /dev/tty
+        read -rp "    ${var_name}: " input_val < /dev/tty 2>/dev/null || true
     fi
 
     if [[ -n "$input_val" ]]; then
