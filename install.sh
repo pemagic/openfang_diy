@@ -231,6 +231,14 @@ build_and_install() {
     chmod +x "$OPENFANG_BIN"
     ok "二进制已安装到 $OPENFANG_BIN"
 
+    # 复制上游 agent 模板（首次安装时必要）
+    if [[ -d "$BUILD_DIR/agents" ]]; then
+        log "正在复制 agent 模板..."
+        cp -rn "$BUILD_DIR/agents/"* "$OPENFANG_HOME/agents/" 2>/dev/null || \
+            cp -r "$BUILD_DIR/agents/"* "$OPENFANG_HOME/agents/"
+        ok "agent 模板已复制"
+    fi
+
     # 清理
     log "正在清理编译目录..."
     rm -rf "$BUILD_DIR"
@@ -295,9 +303,9 @@ configure_agent_toml() {
     mkdir -p "$AGENT_DIR"
 
     if [[ ! -f "$AGENT_TOML" ]]; then
-        log "agent.toml 不存在，等待首次启动后自动生成..."
-        # 首次启动 daemon 会从内置模板创建 agent，之后再修改
-        return 1  # 标记需要后续处理
+        warn "agent.toml 未找到（上游 agents/ 目录可能为空）"
+        warn "请手动创建 $AGENT_TOML 或重新运行安装"
+        return 0
     fi
 
     ok "agent.toml 已存在，检查关键字段..."
@@ -579,24 +587,7 @@ main() {
     configure_config_toml
     echo ""
 
-    # 如果 agent.toml 不存在，先启动一次让 daemon 生成默认模板
-    if ! configure_agent_toml; then
-        log "首次启动 daemon 以生成 agent 模板..."
-        source "$SECRETS_FILE" 2>/dev/null || true
-        "$OPENFANG_BIN" start > /tmp/openfang.log 2>&1 &
-        sleep 5
-        curl -s -X POST http://127.0.0.1:4200/api/shutdown >/dev/null 2>&1 || true
-        sleep 2
-        pkill -f "openfang start" 2>/dev/null || true
-        sleep 1
-
-        if [[ -f "$AGENT_TOML" ]]; then
-            ok "agent.toml 已由 daemon 自动生成"
-            configure_agent_toml
-        else
-            warn "agent.toml 仍未生成，请手动检查"
-        fi
-    fi
+    configure_agent_toml
     echo ""
 
     configure_api_keys
