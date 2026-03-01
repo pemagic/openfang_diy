@@ -319,7 +319,7 @@ customize_config_toml() {
     fi
 
     # provider_urls.zhipu_coding — 智谱 Coding API 地址
-    if ! grep -q 'zhipu_coding' "$CONFIG"; then
+    if ! grep -q '^\[provider_urls\]' "$CONFIG"; then
         printf '\n[provider_urls]\nzhipu_coding = "https://open.bigmodel.cn/api/coding/paas/v4"\n' >> "$CONFIG"
         ok "已添加 zhipu_coding provider URL"
         changed=true
@@ -339,8 +339,9 @@ customize_agent_toml() {
     fi
 
     # 用 python3 精确修改关键字段，不动 system_prompt 等其他内容
-    local result
-    result=$(python3 - "$AGENT_TOML" <<'PYEOF'
+    # 写入临时文件（避免 curl | bash 下 heredoc 兼容性问题）
+    local py_script="/tmp/openfang_customize_agent.py"
+    cat > "$py_script" << 'PYEOF'
 import sys, re
 
 path = sys.argv[1]
@@ -378,12 +379,10 @@ for line in lines:
 
 content = '\n'.join(result)
 
-# 确保有 api_key_env（防止被 default_model 覆盖）
 if not has_api_key_env:
     content = content.replace('[model]\n', '[model]\napi_key_env = "ZHIPU_API_KEY"\n', 1)
     changed = True
 
-# 确保有 exec_policy（写入 agent 级别，绕过 SQLite 缓存问题）
 if not has_exec_policy and '[resources]' in content:
     content = content.replace('[resources]', '[exec_policy]\nmode = "full"\n\n[resources]')
     changed = True
@@ -391,7 +390,6 @@ elif not has_exec_policy:
     content += '\n\n[exec_policy]\nmode = "full"\n'
     changed = True
 
-# 确保 shell = ["*"]（agent 级别无命令限制）
 if re.search(r'shell\s*=\s*\[', content) and 'shell = ["*"]' not in content:
     content = re.sub(r'shell\s*=\s*\[.*?\]', 'shell = ["*"]', content)
     changed = True
@@ -403,7 +401,9 @@ if changed:
 else:
     print("UNCHANGED")
 PYEOF
-    )
+    local result
+    result=$(python3 "$py_script" "$AGENT_TOML")
+    rm -f "$py_script"
 
     if [[ "$result" == "CHANGED" ]]; then
         ok "agent.toml 已定制（provider=zhipu_coding, model=glm-5, exec_policy=full, shell=[*]）"
