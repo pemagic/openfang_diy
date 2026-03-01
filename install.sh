@@ -402,81 +402,71 @@ PYEOF2
     return 0
 }
 
+# 写入单个 key 的辅助函数
+# 用法: write_key "ENV_VAR_NAME" "显示名称" "获取地址提示" [required]
+write_key() {
+    local var_name="$1"
+    local display_name="$2"
+    local help_text="$3"
+    local required="${4:-optional}"
+
+    # 1. secrets.env 中已配置 → 跳过
+    if grep -q "${var_name}=.\+" "$SECRETS_FILE" 2>/dev/null; then
+        ok "$display_name 已配置"
+        return 0
+    fi
+
+    # 2. 环境变量已设置 → 直接写入（支持自动化）
+    local env_val="${!var_name:-}"
+    if [[ -n "$env_val" ]]; then
+        sed -i '' "/^${var_name}=/d" "$SECRETS_FILE" 2>/dev/null || true
+        echo "${var_name}=${env_val}" >> "$SECRETS_FILE"
+        ok "$display_name 已从环境变量写入"
+        return 0
+    fi
+
+    # 3. 交互式输入（从 /dev/tty 读取，兼容 curl | bash）
+    local input_val=""
+    if [[ -t 0 ]]; then
+        # stdin 是终端，正常 read
+        [[ -n "$help_text" ]] && echo -e "    $help_text"
+        read -rp "    ${var_name}: " input_val
+    elif [[ -e /dev/tty ]]; then
+        # stdin 被管道占用（curl | bash），从 /dev/tty 读
+        echo -e "${YELLOW}[?] 请输入 ${display_name}：${NC}"
+        [[ -n "$help_text" ]] && echo -e "    $help_text"
+        read -rp "    ${var_name}: " input_val < /dev/tty
+    else
+        echo -e "${YELLOW}[!] 无法交互式输入，请通过环境变量设置 ${var_name}${NC}"
+        return 1
+    fi
+
+    if [[ -n "$input_val" ]]; then
+        sed -i '' "/^${var_name}=/d" "$SECRETS_FILE" 2>/dev/null || true
+        echo "${var_name}=${input_val}" >> "$SECRETS_FILE"
+        ok "$display_name 已写入"
+    else
+        if [[ "$required" == "required" ]]; then
+            warn "$display_name 未配置，功能可能不可用"
+        else
+            echo -e "${YELLOW}[!] 已跳过${NC}"
+        fi
+    fi
+}
+
 configure_api_keys() {
     log "检查 API 密钥配置..."
     touch "$SECRETS_FILE"
 
-    local all_configured=true
+    write_key "ZHIPU_API_KEY" "智谱 API Key" \
+        "获取地址: https://open.bigmodel.cn/usercenter/apikeys" "required"
 
-    # ZHIPU_API_KEY
-    if grep -q "ZHIPU_API_KEY=.\+" "$SECRETS_FILE" 2>/dev/null; then
-        ok "ZHIPU_API_KEY 已配置"
-    else
-        all_configured=false
-        echo -e "${YELLOW}[?] 请输入智谱 API Key（用于 GLM-5 模型）：${NC}"
-        echo -e "    获取地址: https://open.bigmodel.cn/usercenter/apikeys"
-        read -rp "    ZHIPU_API_KEY: " zhipu_key
-        if [[ -n "$zhipu_key" ]]; then
-            sed -i '' '/^ZHIPU_API_KEY=/d' "$SECRETS_FILE" 2>/dev/null || true
-            echo "ZHIPU_API_KEY=$zhipu_key" >> "$SECRETS_FILE"
-            ok "ZHIPU_API_KEY 已写入"
-        else
-            echo -e "${YELLOW}[!] 已跳过${NC}"
-        fi
-    fi
+    write_key "DINGTALK_ACCESS_TOKEN" "钉钉 Access Token" \
+        "获取地址: 钉钉开放平台 → 应用 → 机器人 → 凭证"
 
-    # DINGTALK_ACCESS_TOKEN
-    if grep -q "DINGTALK_ACCESS_TOKEN=.\+" "$SECRETS_FILE" 2>/dev/null; then
-        ok "DINGTALK_ACCESS_TOKEN 已配置"
-    else
-        all_configured=false
-        echo -e "${YELLOW}[?] 请输入钉钉机器人 Access Token（留空跳过）：${NC}"
-        echo -e "    获取地址: 钉钉开放平台 → 应用 → 机器人 → 凭证"
-        read -rp "    DINGTALK_ACCESS_TOKEN: " dt_token
-        if [[ -n "$dt_token" ]]; then
-            sed -i '' '/^DINGTALK_ACCESS_TOKEN=/d' "$SECRETS_FILE" 2>/dev/null || true
-            echo "DINGTALK_ACCESS_TOKEN=$dt_token" >> "$SECRETS_FILE"
-            ok "DINGTALK_ACCESS_TOKEN 已写入"
-        else
-            echo -e "${YELLOW}[!] 已跳过${NC}"
-        fi
-    fi
+    write_key "DINGTALK_SECRET" "钉钉 Secret" ""
 
-    # DINGTALK_SECRET
-    if grep -q "DINGTALK_SECRET=.\+" "$SECRETS_FILE" 2>/dev/null; then
-        ok "DINGTALK_SECRET 已配置"
-    else
-        all_configured=false
-        echo -e "${YELLOW}[?] 请输入钉钉机器人 Secret（留空跳过）：${NC}"
-        read -rp "    DINGTALK_SECRET: " dt_secret
-        if [[ -n "$dt_secret" ]]; then
-            sed -i '' '/^DINGTALK_SECRET=/d' "$SECRETS_FILE" 2>/dev/null || true
-            echo "DINGTALK_SECRET=$dt_secret" >> "$SECRETS_FILE"
-            ok "DINGTALK_SECRET 已写入"
-        else
-            echo -e "${YELLOW}[!] 已跳过${NC}"
-        fi
-    fi
-
-    # GEMINI_API_KEY
-    if grep -q "GEMINI_API_KEY=.\+" "$SECRETS_FILE" 2>/dev/null; then
-        ok "GEMINI_API_KEY 已配置"
-    else
-        all_configured=false
-        echo -e "${YELLOW}[?] 请输入 Gemini API Key（备用模型，留空跳过）：${NC}"
-        read -rp "    GEMINI_API_KEY: " gemini_key
-        if [[ -n "$gemini_key" ]]; then
-            sed -i '' '/^GEMINI_API_KEY=/d' "$SECRETS_FILE" 2>/dev/null || true
-            echo "GEMINI_API_KEY=$gemini_key" >> "$SECRETS_FILE"
-            ok "GEMINI_API_KEY 已写入"
-        else
-            echo -e "${YELLOW}[!] 已跳过${NC}"
-        fi
-    fi
-
-    if [[ "$all_configured" == true ]]; then
-        ok "所有 API 密钥均已配置，无需输入"
-    fi
+    write_key "GEMINI_API_KEY" "Gemini API Key（备用模型）" ""
 }
 
 # ══════════════════════════════════════════════════════════════════
