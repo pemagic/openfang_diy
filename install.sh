@@ -165,6 +165,7 @@ build_and_install() {
     cd "$BUILD_DIR"
     if ! cargo build --release -p openfang-cli 2>&1 | tee -a "$LOG_FILE" | tail -5; then
         err "编译失败！完整日志: $LOG_FILE"
+        cd "$HOME"
         rm -rf "$BUILD_DIR"
         exit 1
     fi
@@ -191,6 +192,7 @@ build_and_install() {
     ok "OpenFang v${new_ver} (DingTalk Stream) 已安装到 $OPENFANG_BIN"
 
     # ── 清理 ──
+    cd "$HOME"
     rm -rf "$BUILD_DIR"
     ok "编译目录已清理"
 }
