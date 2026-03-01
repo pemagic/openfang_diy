@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 #
-# OpenFang 一键安装/更新 + 定制配置脚本
+# OpenFang 一键安装/更新 + DingTalk Stream 补丁 + 定制配置
 #
-# 基于官方安装流程，叠加以下定制：
-#   - DingTalk Stream 补丁（需要 Rust 编译环境，可选）
-#   - 安全策略：关闭审批、开放 shell 执行
-#   - Agent 模型：glm-5 (智谱 Coding API)
-#   - 交互式配置 API Key
+# 完整流程（不依赖官方安装脚本和交互式 init）：
+#   1. 检查/安装 Rust 和 Git
+#   2. 克隆源码 → 替换 DingTalk Stream 补丁 → 编译
+#   3. 安装二进制 → 配置 PATH
+#   4. 初始化（openfang init --quick，无交互，生成目录/agent模板/基础配置）
+#   5. 叠加定制配置（安全策略 + glm-5 模型 + 钉钉 channel）
+#   6. 配置 API 密钥
+#   7. 启动并验证
 #
 # 用法：
 #   curl -sL https://raw.githubusercontent.com/pemagic/openfang_diy/main/install.sh | bash
 #   ./install.sh                # 安装/更新
-#   ./install.sh --no-patch     # 跳过 DingTalk 补丁编译（仅用官方预编译二进制）
-#   ./install.sh --force        # 强制重新编译补丁
+#   ./install.sh --force        # 强制重新编译
 #   ./install.sh --check        # 只检查版本
 #
 
@@ -28,143 +30,107 @@ SECRETS_FILE="$OPENFANG_HOME/secrets.env"
 BUILD_DIR="/tmp/openfang-build"
 REPO_URL="https://github.com/RightNow-AI/openfang.git"
 DINGTALK_TARGET="crates/openfang-channels/src/dingtalk.rs"
-LOG_FILE="$OPENFANG_HOME/update.log"
 PATCH_GITHUB_URL="https://raw.githubusercontent.com/pemagic/openfang_diy/main/patches/dingtalk_stream.rs"
+LOG_FILE="/tmp/openfang-install.log"
 
-# 补丁文件查找
+# 补丁文件查找（本地优先）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "/tmp")"
 PATCH_FILE=""
 for p in "$SCRIPT_DIR/patches/dingtalk_stream.rs" "$OPENFANG_HOME/patches/dingtalk_stream.rs"; do
-    if [[ -f "$p" ]]; then PATCH_FILE="$p"; break; fi
+    [[ -f "$p" ]] && { PATCH_FILE="$p"; break; }
 done
 
 # ── 颜色 ─────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 log()  { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $1"; }
-ok()   { echo -e "${GREEN}[OK]${NC} $1"; }
-err()  { echo -e "${RED}[ERROR]${NC} $1" >&2; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+ok()   { echo -e "${GREEN}  ✓${NC} $1"; }
+err()  { echo -e "${RED}  ✗${NC} $1" >&2; }
+warn() { echo -e "${YELLOW}  !${NC} $1"; }
 
 # ══════════════════════════════════════════════════════════════════
-#  第一阶段：安装 OpenFang（官方流程）
+#  第一阶段：环境准备
 # ══════════════════════════════════════════════════════════════════
 
-install_openfang() {
-    if [[ -f "$OPENFANG_BIN" ]]; then
-        local local_ver
-        local_ver=$("$OPENFANG_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-        ok "OpenFang 已安装 (v${local_ver})"
+ensure_rust() {
+    if command -v cargo &>/dev/null; then
+        ok "Rust 已安装 ($(rustc --version 2>/dev/null || echo '?'))"
         return 0
     fi
 
-    log "正在通过官方脚本安装 OpenFang..."
-    if curl -fsSL https://openfang.sh/install | sh; then
-        ok "OpenFang 官方安装完成"
+    log "未找到 Rust，正在自动安装 rustup..."
+    if curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 2>&1 | tail -3; then
+        source "$HOME/.cargo/env" 2>/dev/null || true
+        if command -v cargo &>/dev/null; then
+            ok "Rust 安装成功 ($(rustc --version 2>/dev/null || echo '?'))"
+        else
+            err "Rust 安装后仍无法找到 cargo"
+            err "请手动运行: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+            exit 1
+        fi
     else
-        err "官方安装脚本失败"
+        err "Rust 自动安装失败，请手动安装: https://rustup.rs"
         exit 1
     fi
-
-    # 刷新 PATH（官方脚本可能修改了 shell profile）
-    export PATH="$OPENFANG_HOME/bin:$PATH"
-
-    if [[ ! -f "$OPENFANG_BIN" ]]; then
-        err "安装后未找到 openfang 二进制: $OPENFANG_BIN"
-        exit 1
-    fi
-
-    local ver
-    ver=$("$OPENFANG_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-    ok "OpenFang v${ver} 已安装"
 }
 
-init_openfang() {
-    # 如果已经初始化过（config.toml 存在），跳过
-    if [[ -f "$CONFIG" ]]; then
-        ok "OpenFang 已初始化，跳过 init"
+ensure_git() {
+    if command -v git &>/dev/null; then
+        ok "Git 已安装"
         return 0
     fi
-
-    log "正在初始化 OpenFang..."
-    "$OPENFANG_BIN" init 2>/dev/null || true
-    ok "OpenFang 初始化完成"
+    err "未找到 git，请先安装"
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        err "macOS: xcode-select --install"
+    else
+        err "Linux: sudo apt install git 或 sudo yum install git"
+    fi
+    exit 1
 }
 
 # ══════════════════════════════════════════════════════════════════
-#  第二阶段：DingTalk Stream 补丁（可选，需要 Rust）
+#  第二阶段：克隆 → 补丁 → 编译 → 安装
 # ══════════════════════════════════════════════════════════════════
 
-apply_dingtalk_patch() {
+build_and_install() {
     local force="$1"
 
-    # 检查 Rust 工具链，没有则自动安装
-    if ! command -v cargo &>/dev/null; then
-        log "未找到 Rust 编译环境，正在自动安装 rustup..."
-        if curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 2>&1 | tail -3; then
-            # 加载 cargo 环境
-            source "$HOME/.cargo/env" 2>/dev/null || true
-            if command -v cargo &>/dev/null; then
-                ok "Rust 工具链安装成功 ($(rustc --version 2>/dev/null || echo 'unknown'))"
-            else
-                err "Rust 安装后仍无法找到 cargo，请手动运行: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-                return 1
-            fi
-        else
-            err "Rust 自动安装失败，请手动安装: https://rustup.rs"
-            return 1
+    # 版本检查（非强制模式）
+    if [[ "$force" != true && -f "$OPENFANG_BIN" && -f "$OPENFANG_HOME/.dingtalk_patched" ]]; then
+        local local_ver patched_ver remote_ver
+        local_ver=$("$OPENFANG_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
+        patched_ver=$(cat "$OPENFANG_HOME/.dingtalk_patched" 2>/dev/null || echo "")
+        remote_ver=$(git ls-remote --tags "$REPO_URL" 2>/dev/null \
+            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1 | tr -d 'v' || echo "unknown")
+
+        if [[ -n "$patched_ver" && "$patched_ver" == "$remote_ver" ]]; then
+            ok "OpenFang v${local_ver} + DingTalk Stream 已是最新"
+            return 0
         fi
+        log "发现新版本: 本地 v${patched_ver:-?} → 远程 v${remote_ver}"
     fi
 
-    if ! command -v git &>/dev/null; then
-        err "未找到 git，请先安装 git"
-        return 1
+    # ── 克隆源码 ──
+    log "克隆 OpenFang 源码..."
+    rm -rf "$BUILD_DIR"
+    if ! git clone --depth 1 "$REPO_URL" "$BUILD_DIR" 2>&1 | tail -2; then
+        err "源码克隆失败"
+        exit 1
     fi
+    ok "源码克隆完成"
 
-    # 获取补丁文件
+    # ── 获取补丁文件 ──
     if [[ -z "$PATCH_FILE" ]]; then
-        log "正在从 GitHub 下载 DingTalk Stream 补丁..."
+        log "从 GitHub 下载 DingTalk Stream 补丁..."
         mkdir -p "$OPENFANG_HOME/patches"
         PATCH_FILE="$OPENFANG_HOME/patches/dingtalk_stream.rs"
         if ! curl -sfL "$PATCH_GITHUB_URL" -o "$PATCH_FILE" 2>/dev/null || [[ ! -s "$PATCH_FILE" ]]; then
             err "补丁文件下载失败"
-            PATCH_FILE=""
-            return 1
+            exit 1
         fi
         ok "补丁文件已下载"
     fi
 
-    # 版本检查（非强制模式下）
-    if [[ "$force" != true ]]; then
-        local local_ver remote_ver
-        local_ver=$("$OPENFANG_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-        remote_ver=$(git ls-remote --tags "$REPO_URL" 2>/dev/null \
-            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -V | tail -1 | tr -d 'v' || echo "unknown")
-
-        # 检查是否已经编译过补丁（标记文件）
-        if [[ -f "$OPENFANG_HOME/.dingtalk_patched" ]]; then
-            local patched_ver
-            patched_ver=$(cat "$OPENFANG_HOME/.dingtalk_patched")
-            if [[ "$patched_ver" == "$remote_ver" ]]; then
-                ok "DingTalk Stream 补丁已是最新 (v${patched_ver})"
-                return 0
-            fi
-        fi
-    fi
-
-    log "正在编译 DingTalk Stream 补丁（需要几分钟）..."
-
-    # 克隆源码
-    log "克隆 OpenFang 源码..."
-    rm -rf "$BUILD_DIR"
-    git clone --depth 1 "$REPO_URL" "$BUILD_DIR" 2>&1 | tail -2
-    ok "源码克隆完成"
-
-    # 适配性检查
+    # ── 适配性检查 ──
     local issues=0
     log "检查补丁适配性..."
     if grep -q "DingTalkAdapter::new" "$BUILD_DIR/crates/openfang-api/src/channel_bridge.rs" 2>/dev/null; then
@@ -182,102 +148,177 @@ apply_dingtalk_patch() {
         fi
     done
     if [[ $issues -gt 0 && "$force" != true ]]; then
-        err "适配性检查未通过，使用 --force 强制编译"
+        err "适配性检查未通过（${issues} 项），使用 --force 强制"
         rm -rf "$BUILD_DIR"
-        return 1
+        exit 1
     fi
+    ok "适配性检查通过"
 
-    # 替换 dingtalk.rs
+    # ── 替换 DingTalk 源文件 ──
     mkdir -p "$OPENFANG_HOME/patches"
     cp "$BUILD_DIR/$DINGTALK_TARGET" "$OPENFANG_HOME/patches/dingtalk_upstream_latest.rs"
     cp "$PATCH_FILE" "$BUILD_DIR/$DINGTALK_TARGET"
-    ok "dingtalk.rs 已替换"
+    ok "DingTalk Stream 补丁已应用"
 
-    # 编译
-    log "正在编译 (release mode)..."
+    # ── 编译 ──
+    log "正在编译（release mode，需要几分钟）..."
     cd "$BUILD_DIR"
     if ! cargo build --release -p openfang-cli 2>&1 | tee -a "$LOG_FILE" | tail -5; then
-        err "编译失败！日志: $LOG_FILE"
+        err "编译失败！完整日志: $LOG_FILE"
         rm -rf "$BUILD_DIR"
-        return 1
+        exit 1
     fi
     ok "编译成功"
 
-    # 停止服务
+    # ── 停止已有服务 ──
     curl -s -X POST http://127.0.0.1:4200/api/shutdown >/dev/null 2>&1 || true
     pkill -f "openfang start" 2>/dev/null || true
     sleep 2
 
-    # 备份并替换二进制
+    # ── 安装二进制 ──
+    mkdir -p "$OPENFANG_HOME/bin"
     if [[ -f "$OPENFANG_BIN" ]]; then
         cp "$OPENFANG_BIN" "$OPENFANG_BIN.bak.$(date +%Y%m%d%H%M%S)"
         ls -t "$OPENFANG_HOME/bin/openfang.bak."* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
     fi
     cp "$BUILD_DIR/target/release/openfang" "$OPENFANG_BIN"
     chmod +x "$OPENFANG_BIN"
-    ok "已替换为 DingTalk Stream 版本"
 
-    # 记录补丁版本
     local new_ver
     new_ver=$("$OPENFANG_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
     echo "$new_ver" > "$OPENFANG_HOME/.dingtalk_patched"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Patched v${new_ver} (dingtalk stream)" >> "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Installed v${new_ver} with DingTalk Stream patch" >> "$LOG_FILE"
+    ok "OpenFang v${new_ver} (DingTalk Stream) 已安装到 $OPENFANG_BIN"
 
-    # 清理
+    # ── 清理 ──
     rm -rf "$BUILD_DIR"
     ok "编译目录已清理"
 }
 
 # ══════════════════════════════════════════════════════════════════
-#  第三阶段：定制配置（仅补充缺失项，不覆盖已有）
+#  第三阶段：配置 PATH
 # ══════════════════════════════════════════════════════════════════
 
-configure_config_toml() {
-    log "检查 config.toml 定制配置..."
+configure_path() {
+    # 临时生效
+    export PATH="$OPENFANG_HOME/bin:$PATH"
 
-    if [[ ! -f "$CONFIG" ]]; then
-        warn "config.toml 不存在，请先运行 openfang init"
-        return 1
+    # 检查是否已在 profile 中
+    local profile=""
+    case "${SHELL:-/bin/bash}" in
+        */zsh)  profile="$HOME/.zshrc" ;;
+        */bash)
+            if [[ -f "$HOME/.bash_profile" ]]; then
+                profile="$HOME/.bash_profile"
+            else
+                profile="$HOME/.bashrc"
+            fi
+            ;;
+        */fish) profile="$HOME/.config/fish/config.fish" ;;
+        *)      profile="$HOME/.profile" ;;
+    esac
+
+    if [[ -n "$profile" && -f "$profile" ]] && grep -q '\.openfang/bin' "$profile" 2>/dev/null; then
+        ok "PATH 已配置 ($profile)"
+        return 0
     fi
 
-    # [approval] — 仅缺失时添加
-    if ! grep -q '^\[approval\]' "$CONFIG"; then
-        printf '\n[approval]\nrequire_approval = false\n' >> "$CONFIG"
-        ok "已添加 [approval] require_approval = false"
-    else
-        ok "[approval] 已配置，跳过"
-    fi
-
-    # [exec_policy] — 仅缺失时添加
-    if ! grep -q '^\[exec_policy\]' "$CONFIG"; then
-        printf '\n[exec_policy]\nmode = "full"\n' >> "$CONFIG"
-        ok "已添加 [exec_policy] mode = \"full\""
-    else
-        ok "[exec_policy] 已配置，跳过"
-    fi
-
-    # [channels.dingtalk] — 仅缺失时添加
-    if ! grep -q '^\[channels\.dingtalk\]' "$CONFIG"; then
-        printf '\n[channels.dingtalk]\ndefault_agent = "assistant"\n' >> "$CONFIG"
-        ok "已添加 [channels.dingtalk]"
-    else
-        ok "[channels.dingtalk] 已配置，跳过"
-    fi
-
-    # provider_urls.zhipu_coding — 仅缺失时添加
-    if ! grep -q 'zhipu_coding' "$CONFIG"; then
-        printf '\n[provider_urls]\nzhipu_coding = "https://open.bigmodel.cn/api/coding/paas/v4"\n' >> "$CONFIG"
-        ok "已添加 zhipu_coding provider URL"
-    else
-        ok "zhipu_coding 已配置，跳过"
+    if [[ -n "$profile" ]]; then
+        echo "" >> "$profile"
+        echo '# OpenFang' >> "$profile"
+        if [[ "$profile" == *"fish"* ]]; then
+            echo 'set -gx PATH $HOME/.openfang/bin $PATH' >> "$profile"
+        else
+            echo 'export PATH="$HOME/.openfang/bin:$PATH"' >> "$profile"
+        fi
+        ok "PATH 已写入 $profile"
     fi
 }
 
-configure_agent_toml() {
-    log "检查 assistant agent.toml..."
+# ══════════════════════════════════════════════════════════════════
+#  第四阶段：初始化（目录 + agent 模板 + 基础配置）
+# ══════════════════════════════════════════════════════════════════
+
+initialize_openfang() {
+    if [[ -f "$CONFIG" && -d "$OPENFANG_HOME/agents/assistant" ]]; then
+        ok "已初始化，跳过（config.toml 和 agent 模板已存在）"
+        return 0
+    fi
+
+    log "初始化 OpenFang（非交互 --quick 模式）..."
+
+    # openfang init --quick：
+    #   - 创建 ~/.openfang/, data/, agents/ 目录（权限 0700）
+    #   - 安装 30 个 bundled agent 模板（跳过已存在的）
+    #   - 自动检测 provider（从环境变量）
+    #   - 写入 config.toml（仅不存在时）
+    #   - 完全无交互，专为脚本/CI 设计
+    if "$OPENFANG_BIN" init --quick 2>&1 | tail -5; then
+        ok "初始化完成（30 个 agent 模板已安装）"
+    else
+        err "初始化失败"
+        exit 1
+    fi
+}
+
+# ══════════════════════════════════════════════════════════════════
+#  第五阶段：定制配置（仅补充/修改必要项，不覆盖其他内容）
+# ══════════════════════════════════════════════════════════════════
+
+customize_config_toml() {
+    log "定制 config.toml..."
+
+    if [[ ! -f "$CONFIG" ]]; then
+        err "config.toml 不存在"
+        return 1
+    fi
+
+    local changed=false
+
+    # [approval] require_approval = false — 关闭工具执行审批
+    if ! grep -q '^\[approval\]' "$CONFIG"; then
+        printf '\n[approval]\nrequire_approval = false\n' >> "$CONFIG"
+        ok "已添加 [approval] require_approval = false"
+        changed=true
+    else
+        ok "[approval] 已存在，跳过"
+    fi
+
+    # [exec_policy] mode = "full" — 开放所有 shell 命令
+    if ! grep -q '^\[exec_policy\]' "$CONFIG"; then
+        printf '\n[exec_policy]\nmode = "full"\n' >> "$CONFIG"
+        ok "已添加 [exec_policy] mode = \"full\""
+        changed=true
+    else
+        ok "[exec_policy] 已存在，跳过"
+    fi
+
+    # [channels.dingtalk] — 钉钉 channel 绑定 assistant
+    if ! grep -q '^\[channels\.dingtalk\]' "$CONFIG"; then
+        printf '\n[channels.dingtalk]\ndefault_agent = "assistant"\n' >> "$CONFIG"
+        ok "已添加 [channels.dingtalk]"
+        changed=true
+    else
+        ok "[channels.dingtalk] 已存在，跳过"
+    fi
+
+    # provider_urls.zhipu_coding — 智谱 Coding API 地址
+    if ! grep -q 'zhipu_coding' "$CONFIG"; then
+        printf '\n[provider_urls]\nzhipu_coding = "https://open.bigmodel.cn/api/coding/paas/v4"\n' >> "$CONFIG"
+        ok "已添加 zhipu_coding provider URL"
+        changed=true
+    else
+        ok "zhipu_coding 已存在，跳过"
+    fi
+
+    [[ "$changed" == false ]] && ok "config.toml 无需修改"
+}
+
+customize_agent_toml() {
+    log "定制 assistant agent.toml..."
 
     if [[ ! -f "$AGENT_TOML" ]]; then
-        ok "agent.toml 不存在，跳过（首次启动后可在 Dashboard 配置）"
+        warn "agent.toml 不存在，跳过（启动后可在 Dashboard 配置）"
         return 0
     fi
 
@@ -321,14 +362,20 @@ for line in lines:
 
 content = '\n'.join(result)
 
+# 确保有 api_key_env（防止被 default_model 覆盖）
 if not has_api_key_env:
     content = content.replace('[model]\n', '[model]\napi_key_env = "ZHIPU_API_KEY"\n', 1)
     changed = True
 
+# 确保有 exec_policy（写入 agent 级别，绕过 SQLite 缓存问题）
 if not has_exec_policy and '[resources]' in content:
     content = content.replace('[resources]', '[exec_policy]\nmode = "full"\n\n[resources]')
     changed = True
+elif not has_exec_policy:
+    content += '\n\n[exec_policy]\nmode = "full"\n'
+    changed = True
 
+# 确保 shell = ["*"]（agent 级别无命令限制）
 if re.search(r'shell\s*=\s*\[', content) and 'shell = ["*"]' not in content:
     content = re.sub(r'shell\s*=\s*\[.*?\]', 'shell = ["*"]', content)
     changed = True
@@ -343,13 +390,15 @@ PYEOF
     )
 
     if [[ "$result" == "CHANGED" ]]; then
-        ok "agent.toml 关键字段已更新（provider/model/exec_policy/shell）"
+        ok "agent.toml 已定制（provider=zhipu_coding, model=glm-5, exec_policy=full, shell=[*]）"
     else
-        ok "agent.toml 已是正确配置，无需修改"
+        ok "agent.toml 已是正确配置"
     fi
 }
 
-# ── API Key 配置 ─────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+#  第六阶段：API 密钥
+# ══════════════════════════════════════════════════════════════════
 
 write_key() {
     local var_name="$1"
@@ -357,7 +406,7 @@ write_key() {
     local help_text="$3"
     local required="${4:-optional}"
 
-    # 1. secrets.env 中已配置 → 跳过
+    # 1. secrets.env 中已有 → 跳过
     if grep -q "${var_name}=.\+" "$SECRETS_FILE" 2>/dev/null; then
         ok "$display_name 已配置"
         return 0
@@ -366,44 +415,45 @@ write_key() {
     # 2. 环境变量已设置 → 直接写入
     local env_val="${!var_name:-}"
     if [[ -n "$env_val" ]]; then
-        sed -i '' "/^${var_name}=/d" "$SECRETS_FILE" 2>/dev/null || true
+        sed -i '' "/^${var_name}=/d" "$SECRETS_FILE" 2>/dev/null || sed -i "/^${var_name}=/d" "$SECRETS_FILE" 2>/dev/null || true
         echo "${var_name}=${env_val}" >> "$SECRETS_FILE"
         ok "$display_name 已从环境变量写入"
         return 0
     fi
 
-    # 3. 交互式输入（兼容 curl | bash）
+    # 3. 交互式输入（兼容 curl | bash 的 stdin 被占用情况）
     local input_val=""
     if [[ -t 0 ]]; then
-        echo -e "${YELLOW}[?] 请输入 ${display_name}（留空跳过）：${NC}"
+        echo -e "${YELLOW}  ? 请输入 ${display_name}（留空跳过）：${NC}"
         [[ -n "$help_text" ]] && echo -e "    $help_text"
         read -rp "    ${var_name}: " input_val
     elif [[ -e /dev/tty ]]; then
-        echo -e "${YELLOW}[?] 请输入 ${display_name}（留空跳过）：${NC}"
+        echo -e "${YELLOW}  ? 请输入 ${display_name}（留空跳过）：${NC}"
         [[ -n "$help_text" ]] && echo -e "    $help_text"
         read -rp "    ${var_name}: " input_val < /dev/tty
     fi
 
     if [[ -n "$input_val" ]]; then
-        sed -i '' "/^${var_name}=/d" "$SECRETS_FILE" 2>/dev/null || true
+        sed -i '' "/^${var_name}=/d" "$SECRETS_FILE" 2>/dev/null || sed -i "/^${var_name}=/d" "$SECRETS_FILE" 2>/dev/null || true
         echo "${var_name}=${input_val}" >> "$SECRETS_FILE"
         ok "$display_name 已写入"
     elif [[ "$required" == "required" ]]; then
-        warn "$display_name 未配置，功能可能不可用"
+        warn "$display_name 未配置（必需，功能可能不可用）"
     else
-        echo -e "${YELLOW}[!] 已跳过${NC}"
+        warn "$display_name 已跳过"
     fi
 }
 
 configure_api_keys() {
-    log "检查 API 密钥配置..."
+    log "配置 API 密钥..."
     touch "$SECRETS_FILE"
+    chmod 600 "$SECRETS_FILE"
 
     write_key "ZHIPU_API_KEY" "智谱 API Key" \
-        "获取地址: https://open.bigmodel.cn/usercenter/apikeys" "required"
+        "获取: https://open.bigmodel.cn/usercenter/apikeys" "required"
 
     write_key "DINGTALK_ACCESS_TOKEN" "钉钉 Access Token" \
-        "获取地址: 钉钉开放平台 → 应用 → 机器人 → 凭证"
+        "获取: 钉钉开放平台 → 应用 → 机器人 → 凭证"
 
     write_key "DINGTALK_SECRET" "钉钉 Secret" ""
 
@@ -411,52 +461,73 @@ configure_api_keys() {
 }
 
 # ══════════════════════════════════════════════════════════════════
-#  第四阶段：启动并验证
+#  第七阶段：启动并验证
 # ══════════════════════════════════════════════════════════════════
 
 start_and_verify() {
-    log "启动 OpenFang daemon..."
+    log "启动 OpenFang..."
 
-    # 停止已有实例
+    # 停止已有
     curl -s -X POST http://127.0.0.1:4200/api/shutdown >/dev/null 2>&1 || true
     pkill -f "openfang start" 2>/dev/null || true
     sleep 3
 
     # 加载密钥并启动
+    set -a
     source "$SECRETS_FILE" 2>/dev/null || true
-    "$OPENFANG_BIN" start > /tmp/openfang.log 2>&1 &
-    sleep 5
+    [[ -f "$OPENFANG_HOME/.env" ]] && source "$OPENFANG_HOME/.env" 2>/dev/null || true
+    set +a
 
-    if curl -s http://127.0.0.1:4200/api/health | grep -q '"ok"'; then
-        ok "OpenFang 已启动"
+    "$OPENFANG_BIN" start > /tmp/openfang-daemon.log 2>&1 &
+    local daemon_pid=$!
+    log "等待 daemon 启动 (PID: $daemon_pid)..."
+
+    # 等待 health check（最多 15 秒）
+    local ok_health=false
+    for i in $(seq 1 15); do
+        if curl -s http://127.0.0.1:4200/api/health 2>/dev/null | grep -q '"ok"'; then
+            ok_health=true
+            break
+        fi
+        sleep 1
+    done
+
+    if [[ "$ok_health" == true ]]; then
+        ok "Daemon 已启动"
     else
-        warn "daemon 可能未完全启动，请检查 /tmp/openfang.log"
-        return
+        err "Daemon 启动超时，请检查 /tmp/openfang-daemon.log"
+        return 1
     fi
 
-    # 验证 agent
+    # 检查 agent
+    sleep 2
     local agent_count
-    agent_count=$(curl -s http://127.0.0.1:4200/api/agents | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+    agent_count=$(curl -s http://127.0.0.1:4200/api/agents 2>/dev/null \
+        | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+
     if [[ "$agent_count" -gt 0 ]]; then
-        ok "Agent 已就绪 (共 ${agent_count} 个)"
+        ok "Agent 已就绪（共 ${agent_count} 个）"
     else
-        log "尝试手动创建 agent..."
+        log "手动创建 assistant agent..."
         curl -s -X POST http://127.0.0.1:4200/api/agents/spawn-by-name \
-          -H "Content-Type: application/json" \
-          -d '{"name": "assistant"}' >/dev/null 2>&1
-        sleep 2
-        agent_count=$(curl -s http://127.0.0.1:4200/api/agents | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+            -H "Content-Type: application/json" \
+            -d '{"name": "assistant"}' >/dev/null 2>&1
+        sleep 3
+        agent_count=$(curl -s http://127.0.0.1:4200/api/agents 2>/dev/null \
+            | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
         if [[ "$agent_count" -gt 0 ]]; then
             ok "Agent 已创建"
         else
-            warn "Agent 创建失败，请在 Dashboard 手动创建"
+            warn "Agent 创建失败，请在 Dashboard (http://127.0.0.1:4200) 手动创建"
         fi
     fi
 
-    # 验证钉钉
+    # 检查钉钉
     sleep 2
-    if grep -q "Stream connected" /tmp/openfang.log 2>/dev/null; then
+    if grep -qi "stream.*connect\|dingtalk.*connect\|Stream connected" /tmp/openfang-daemon.log 2>/dev/null; then
         ok "钉钉 Stream 已连接"
+    else
+        warn "钉钉 Stream 未检测到连接（可能需要等待或检查 token）"
     fi
 }
 
@@ -466,21 +537,18 @@ start_and_verify() {
 
 main() {
     local force=false
-    local no_patch=false
     local check_only=false
 
     for arg in "$@"; do
         case "$arg" in
             --force) force=true ;;
-            --no-patch) no_patch=true ;;
             --check) check_only=true ;;
             --help|-h)
-                echo "用法: $0 [--no-patch] [--force] [--check]"
+                echo "用法: $0 [--force] [--check]"
                 echo ""
-                echo "  无参数       安装 OpenFang + DingTalk 补丁 + 定制配置"
-                echo "  --no-patch   跳过 DingTalk Stream 补丁（不需要 Rust）"
-                echo "  --force      强制重新编译补丁"
-                echo "  --check      只检查版本"
+                echo "  无参数     一键安装/更新（编译 + 补丁 + 配置）"
+                echo "  --force    强制重新编译"
+                echo "  --check    只检查版本"
                 exit 0
                 ;;
         esac
@@ -488,7 +556,7 @@ main() {
 
     echo ""
     echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║   OpenFang 一键安装 + 定制配置            ║"
+    echo "  ║   OpenFang 一键安装 + DingTalk Stream    ║"
     echo "  ╚══════════════════════════════════════════╝"
     echo ""
 
@@ -497,11 +565,11 @@ main() {
         if [[ -f "$OPENFANG_BIN" ]]; then
             local ver
             ver=$("$OPENFANG_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "unknown")
-            log "本地版本: $ver"
+            log "本地版本: v$ver"
             if [[ -f "$OPENFANG_HOME/.dingtalk_patched" ]]; then
-                log "DingTalk 补丁版本: $(cat "$OPENFANG_HOME/.dingtalk_patched")"
+                log "DingTalk Stream 补丁: v$(cat "$OPENFANG_HOME/.dingtalk_patched")"
             else
-                log "DingTalk 补丁: 未安装"
+                log "DingTalk Stream 补丁: 未安装"
             fi
         else
             log "OpenFang 未安装"
@@ -509,54 +577,59 @@ main() {
         exit 0
     fi
 
-    # ── 第一阶段：安装 ──
-    log "═══ 第一阶段：安装 OpenFang ═══"
-    echo ""
-    install_openfang
-    init_openfang
-    echo ""
-
-    # ── 第二阶段：DingTalk 补丁 ──
-    if [[ "$no_patch" == true ]]; then
-        log "跳过 DingTalk Stream 补丁 (--no-patch)"
-    else
-        log "═══ 第二阶段：DingTalk Stream 补丁 ═══"
-        echo ""
-        apply_dingtalk_patch "$force"
-    fi
+    # ── 第一阶段 ──
+    log "══ 第一阶段：环境准备 ══"
+    ensure_rust
+    ensure_git
     echo ""
 
-    # ── 第三阶段：定制配置 ──
-    log "═══ 第三阶段：定制配置 ═══"
+    # ── 第二阶段 ──
+    log "══ 第二阶段：编译安装 ══"
+    build_and_install "$force"
     echo ""
-    configure_config_toml
+
+    # ── 第三阶段 ──
+    log "══ 第三阶段：配置 PATH ══"
+    configure_path
     echo ""
-    configure_agent_toml
+
+    # ── 第四阶段 ──
+    log "══ 第四阶段：初始化 ══"
+    initialize_openfang
     echo ""
+
+    # ── 第五阶段 ──
+    log "══ 第五阶段：定制配置 ══"
+    customize_config_toml
+    echo ""
+    customize_agent_toml
+    echo ""
+
+    # ── 第六阶段 ──
+    log "══ 第六阶段：API 密钥 ══"
     configure_api_keys
     echo ""
 
-    # ── 第四阶段：启动验证 ──
-    log "═══ 第四阶段：启动并验证 ═══"
-    echo ""
+    # ── 第七阶段 ──
+    log "══ 第七阶段：启动验证 ══"
     start_and_verify
 
     # ── 完成 ──
-    local final_ver
+    local final_ver patch_ver
     final_ver=$("$OPENFANG_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo "?")
-    local patch_status="未安装"
-    if [[ -f "$OPENFANG_HOME/.dingtalk_patched" ]]; then
-        patch_status="已启用"
-    fi
+    patch_ver=$(cat "$OPENFANG_HOME/.dingtalk_patched" 2>/dev/null || echo "?")
 
     echo ""
-    echo "  ╔════════════════════════════════════════╗"
-    echo "  ║            安装完成!                    ║"
-    echo "  ║  版本: v${final_ver}                        ║"
-    echo "  ║  模型: glm-5 (智谱 Coding API)          ║"
-    echo "  ║  DingTalk Stream: ${patch_status}              ║"
-    echo "  ║  Shell: 全权限 · 审批: 已关闭           ║"
-    echo "  ╚════════════════════════════════════════╝"
+    echo "  ╔════════════════════════════════════════════════╗"
+    echo "  ║              安装完成!                          ║"
+    echo "  ╠════════════════════════════════════════════════╣"
+    echo "  ║  版本: v${final_ver} (DingTalk Stream: v${patch_ver})     ║"
+    echo "  ║  模型: glm-5 (智谱 Coding API)                  ║"
+    echo "  ║  Shell: 全权限 · 审批: 已关闭                    ║"
+    echo "  ║  Dashboard: http://127.0.0.1:4200               ║"
+    echo "  ╚════════════════════════════════════════════════╝"
+    echo ""
+    echo "  更新时再跑一遍同样的命令即可。"
     echo ""
 }
 
