@@ -4,6 +4,14 @@ OpenFang 个人定制脚本：一键安装/更新 + DingTalk Stream 补丁 + 自
 
 ## 快速开始
 
+一句话安装：
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/pemagic/openfang_diy/main/install.sh)
+```
+
+或者 clone 后运行：
+
 ```bash
 git clone https://github.com/pemagic/openfang_diy.git
 cd openfang_diy

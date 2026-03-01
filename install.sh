@@ -31,14 +31,23 @@ AGENT_DIR="$OPENFANG_HOME/agents/assistant"
 AGENT_TOML="$AGENT_DIR/agent.toml"
 SECRETS_FILE="$OPENFANG_HOME/secrets.env"
 
-# 补丁文件：优先用脚本同目录下的，其次用 ~/.openfang/patches/ 下的
+# 补丁文件：优先用脚本同目录下的，其次用 ~/.openfang/patches/ 下的，最后从 GitHub 下载
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PATCH_GITHUB_URL="https://raw.githubusercontent.com/pemagic/openfang_diy/main/patches/dingtalk_stream.rs"
+
 if [[ -f "$SCRIPT_DIR/patches/dingtalk_stream.rs" ]]; then
     PATCH_FILE="$SCRIPT_DIR/patches/dingtalk_stream.rs"
 elif [[ -f "$OPENFANG_HOME/patches/dingtalk_stream.rs" ]]; then
     PATCH_FILE="$OPENFANG_HOME/patches/dingtalk_stream.rs"
 else
-    PATCH_FILE=""
+    # 自动从 GitHub 下载补丁文件
+    PATCH_FILE="$OPENFANG_HOME/patches/dingtalk_stream.rs"
+    mkdir -p "$OPENFANG_HOME/patches"
+    if curl -sfL "$PATCH_GITHUB_URL" -o "$PATCH_FILE" 2>/dev/null && [[ -s "$PATCH_FILE" ]]; then
+        : # 下载成功，在 preflight 后会提示
+    else
+        PATCH_FILE=""
+    fi
 fi
 
 # ── 颜色 ─────────────────────────────────────────────────────────
