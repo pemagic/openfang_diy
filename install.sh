@@ -561,12 +561,44 @@ main() {
         case "$arg" in
             --force) force=true ;;
             --check) check_only=true ;;
-            --help|-h)
-                echo "用法: $0 [--force] [--check]"
+            --uninstall)
                 echo ""
-                echo "  无参数     一键安装/更新（编译 + 补丁 + 配置）"
-                echo "  --force    强制重新编译"
-                echo "  --check    只检查版本"
+                log "正在卸载 OpenFang..."
+                # 停止 daemon
+                curl -s -X POST http://127.0.0.1:4200/api/shutdown >/dev/null 2>&1 || true
+                pkill -f "openfang start" 2>/dev/null || true
+                sleep 2
+                # 删除安装目录
+                rm -rf "$OPENFANG_HOME"
+                ok "已删除 $OPENFANG_HOME"
+                # 清理 PATH
+                for f in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
+                    if [[ -f "$f" ]] && grep -q '\.openfang/bin' "$f" 2>/dev/null; then
+                        sed -i '' '/# OpenFang/d;/\.openfang\/bin/d' "$f" 2>/dev/null || \
+                        sed -i '/# OpenFang/d;/\.openfang\/bin/d' "$f" 2>/dev/null || true
+                        ok "已清理 $f 中的 PATH 配置"
+                    fi
+                done
+                # 清理 fish
+                local fish_conf="$HOME/.config/fish/config.fish"
+                if [[ -f "$fish_conf" ]] && grep -q '\.openfang/bin' "$fish_conf" 2>/dev/null; then
+                    sed -i '' '/openfang/d' "$fish_conf" 2>/dev/null || \
+                    sed -i '/openfang/d' "$fish_conf" 2>/dev/null || true
+                    ok "已清理 fish 配置"
+                fi
+                echo ""
+                ok "OpenFang 已彻底卸载"
+                echo "  重新安装: curl -sL https://raw.githubusercontent.com/pemagic/openfang_diy/main/install.sh | bash"
+                echo ""
+                exit 0
+                ;;
+            --help|-h)
+                echo "用法: $0 [--force] [--check] [--uninstall]"
+                echo ""
+                echo "  无参数       一键安装/更新（编译 + 补丁 + 配置）"
+                echo "  --force      强制重新编译"
+                echo "  --check      只检查版本"
+                echo "  --uninstall  彻底卸载（删除所有文件和配置）"
                 exit 0
                 ;;
         esac
