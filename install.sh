@@ -291,6 +291,24 @@ customize_config_toml() {
         ok "default_model 已是自定义配置，跳过"
     fi
 
+    # base_url — 必须显式设置！
+    # OpenFang 源码 bug: ZHIPU_CODING_BASE_URL 和 ZHIPU_BASE_URL 完全相同（都是 /api/paas/v4）
+    # 正确的 Coding API 地址应为 /api/coding/paas/v4，不设 base_url 会导致 fallback 到 Gemini 等免费模型
+    if grep -q 'provider = "zhipu_coding"' "$CONFIG" 2>/dev/null; then
+        if grep -q 'base_url.*coding/paas' "$CONFIG" 2>/dev/null; then
+            ok "base_url 已正确设置"
+        else
+            # 移除可能存在的错误 base_url
+            sed -i '' '/^base_url.*bigmodel/d' "$CONFIG" 2>/dev/null || \
+            sed -i '/^base_url.*bigmodel/d' "$CONFIG" 2>/dev/null || true
+            # 在 api_key_env 后插入正确的 base_url
+            sed -i '' $'s|api_key_env = "ZHIPU_API_KEY"|api_key_env = "ZHIPU_API_KEY"\\\nbase_url = "https://open.bigmodel.cn/api/coding/paas/v4"|' "$CONFIG" 2>/dev/null || \
+            sed -i 's|api_key_env = "ZHIPU_API_KEY"|api_key_env = "ZHIPU_API_KEY"\nbase_url = "https://open.bigmodel.cn/api/coding/paas/v4"|' "$CONFIG"
+            ok "已设置 base_url = https://open.bigmodel.cn/api/coding/paas/v4"
+            changed=true
+        fi
+    fi
+
     # [approval] require_approval = false — 关闭工具执行审批
     if ! grep -q '^\[approval\]' "$CONFIG"; then
         printf '\n[approval]\nrequire_approval = false\n' >> "$CONFIG"
@@ -353,9 +371,12 @@ with open(path, 'r') as f:
 lines = content.split('\n')
 in_model = False
 has_api_key_env = False
+has_base_url = False
 has_exec_policy = False
 changed = False
 result = []
+
+CODING_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 
 for line in lines:
     stripped = line.strip()
@@ -376,6 +397,11 @@ for line in lines:
             if '"ZHIPU_API_KEY"' not in stripped:
                 line = 'api_key_env = "ZHIPU_API_KEY"'
                 changed = True
+        elif re.match(r'base_url\s*=', stripped):
+            has_base_url = True
+            if CODING_URL not in stripped:
+                line = 'base_url = "' + CODING_URL + '"'
+                changed = True
 
     result.append(line)
 
@@ -383,6 +409,10 @@ content = '\n'.join(result)
 
 if not has_api_key_env:
     content = content.replace('[model]\n', '[model]\napi_key_env = "ZHIPU_API_KEY"\n', 1)
+    changed = True
+
+if not has_base_url:
+    content = content.replace('[model]\n', '[model]\nbase_url = "' + CODING_URL + '"\n', 1)
     changed = True
 
 if not has_exec_policy and '[resources]' in content:
@@ -408,7 +438,7 @@ PYEOF
     rm -f "$py_script"
 
     if [[ "$result" == "CHANGED" ]]; then
-        ok "agent.toml 已定制（provider=zhipu_coding, model=glm-5, exec_policy=full, shell=[*]）"
+        ok "agent.toml 已定制（provider=zhipu_coding, model=glm-5, base_url=coding/paas/v4, exec_policy=full, shell=[*]）"
     else
         ok "agent.toml 已是正确配置"
     fi
@@ -489,6 +519,13 @@ start_and_verify() {
     curl -s -X POST http://127.0.0.1:4200/api/shutdown >/dev/null 2>&1 || true
     pkill -f "openfang start" 2>/dev/null || true
     sleep 3
+
+    # 清除 agent 缓存，确保新配置（特别是 base_url）生效
+    # SQLite 中的旧 agent 数据可能覆盖 agent.toml 的更新
+    if command -v sqlite3 &>/dev/null && [[ -f "$OPENFANG_HOME/data/openfang.db" ]]; then
+        sqlite3 "$OPENFANG_HOME/data/openfang.db" "DELETE FROM agents WHERE name='assistant';" 2>/dev/null || true
+        ok "已清除 agent 缓存"
+    fi
 
     # 加载密钥并启动
     set -a
